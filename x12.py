@@ -122,25 +122,76 @@ class EdiX12(EdiBase):
         if address_type == 'ST':
             state["address"] = self.universal_element_extract(segment,4)
         if state["address"] and state["part_record"]:
-            state["part_record"].plant = state["address"]
+            state["part_record"].address = state["address"]
 
     def handle_accum(self, segment, state):
         accum_type = self.universal_element_extract(segment,1)
         if state["part_record"]:
             if accum_type == '01':
-                q,d = self.universal_element_extract(segment,[2,4], date=True)
+                element_types = [
+                    2,
+                    {"pos":4, "date":True}
+                ]
+                q,d = self.universal_element_extract(segment, element_types, date=True, date_format_in=self.accum_date_format)
                 state["part_record"].last_received_ship_quantity = q
                 state["part_record"].last_received_ship_date = d
             elif accum_type == '02':
-                a, s, e = self.universal_element_extract(segment, [2,4,6], date=True)
+                element_types = [
+                    2,
+                    {"pos": 4, "date": True},
+                    {"pos": 6, "date": True}
+                ]
+                a, s, e = self.universal_element_extract(segment, element_types, date_format_in=self.accum_date_format)
                 state["part_record"].total_accum = a
                 state["part_record"].total_accum_start_date = s
                 state["part_record"].total_accum_end_date = e
             elif accum_type == 'PQ':
-                a, s, e = self.universal_element_extract(segment, [3,5,2], date=True)
+                element_types = [
+                    3,
+                    {"pos": 5, "date": True},
+                    {"pos": 2, "date": True}
+                ]
+                a, s, e = self.universal_element_extract(segment, element_types, date_format_in=self.accum_date_format)
                 state["part_record"].total_accum = a
                 state["part_record"].total_accum_start_date = s
                 state["part_record"].total_accum_end_date = e
+
+    def handle_release(self, segment, state):
+        if state["part_record"]:
+            element_types = [
+                1,
+                2,
+                3,
+                {"pos": 4, "date": True}
+            ]
+            qty, fcst, timing, reldate = self.universal_element_extract(segment, element_types, date_format_in=self.release_date_format)
+            state["rel_class"] = X12ReleaseDetails(reldate, qty, fcst, timing)
+            state["part_record"].release_list.append(state["rel_class"])
+            state["rel_class"] = None
+    def handle_end(self, segment, state):
+        """Handle the end of an EDI document (END segment)."""
+        part_record = state["part_record"]
+        edi_class = state["edi_class"]
+        purchase_order = state["purchase_order"]
+        address = state["address"]
+        total_accum = state["total_accum"]
+        total_accum_start_date = state["total_accum_start_date"]
+        total_accum_end_date = state["total_accum_end_date"]
+
+        # Finalize any remaining part record
+        if part_record:
+            part_record.set_if_none("purchase_order", purchase_order)
+            part_record.set_if_none("address", address)
+            part_record.set_if_none("total_accum", total_accum)
+            part_record.set_if_none("total_accum_start_date", total_accum_start_date)
+            part_record.set_if_none("total_accum_end_date", total_accum_end_date)
+            edi_class.part_list.append(part_record)
+            state["part_record"] = None
+
+        # Finalize the EDI document
+        if edi_class:
+            state["edi_class_list"].append(edi_class)
+            state["edi_class"] = None
 
 class X12ReleaseDetails(EdiReleaseDetails):
     def __init__(self, date: str, quantity: str, rel_type: str, rel_timing: str, **kwargs):
