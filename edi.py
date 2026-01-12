@@ -1,8 +1,8 @@
 from datetime import datetime
 from abc import ABC, abstractmethod
 from warnings import warn
-
-FORECAST_CROSSREF = {
+DEFAULT_DATE_FORMAT = '%Y%m%d'
+FORECAST_CROSSREF = {#1/9/2026 TODO - Update for EDIFACT
     "X12":{
         "A":"Immediate",
         "B":"Pilot/Prevolume",
@@ -11,7 +11,7 @@ FORECAST_CROSSREF = {
         "Z":"Mutually Defined"
     }
 }
-TIMING_CROSSREF = {
+TIMING_CROSSREF = {#1/9/2026 TODO - Update for EDIFACT
     "X12":{
         "D":"Discrete",
         "C":"Daily",
@@ -121,12 +121,11 @@ class EdiBase(ABC):
         if language not in VALID_LANGUAGES:
             raise ValueError(f"{type(self).__name__} requires a language value of one of {VALID_LANGUAGES}. Received {language}.")
         self.language = language
-        if not element_separator:
-            self.element_separator = DEFAULT_SEPARATORS[self.language]["ELEMENT"]
-        if not subelement_separator:
-            self.subelement_separator = DEFAULT_SEPARATORS[self.language]["SUBELEMENT"]
-        if not segment_separator:
-            self.segment_separator = DEFAULT_SEPARATORS[self.language]["SEGMENT"]
+        self.element_separator = element_separator or DEFAULT_SEPARATORS[self.language]["ELEMENT"]
+        self.subelement_separator = subelement_separator or DEFAULT_SEPARATORS[self.language]["SUBELEMENT"]
+        self.segment_separator = segment_separator or DEFAULT_SEPARATORS[self.language]["SEGMENT"]
+        self.release_date_format = DEFAULT_DATE_FORMAT#1/9/2026 - TODO - Need to handle date format defaults better.
+        self.accum_date_format = DEFAULT_DATE_FORMAT
         self.element_separator = self.element_separator.encode().decode('unicode_escape')
         self.subelement_separator = self.subelement_separator.encode().decode('unicode_escape')
         self.segment_separator = self.segment_separator.encode().decode('unicode_escape')
@@ -173,7 +172,14 @@ class EdiBase(ABC):
 
 
 
-    def universal_element_extract(self, segment: str, position: int | tuple[int, int] | list | dict, *, date: bool=False, date_format_in: str='%Y%m%d', date_format_out: str='%m-%d-%Y'):
+    def universal_element_extract(self, 
+                                  segment: str, 
+                                  position: int | tuple[int, int] | list | dict, 
+                                  *, 
+                                  date: bool=False, 
+                                  date_format_in: str='%Y%m%d', 
+                                  date_format_out: str='%m-%d-%Y'
+                                  ):
         """
         Extracts a single element from a given EDI segment based on the position/subposition index.
         
@@ -225,7 +231,7 @@ class EdiBase(ABC):
                             subposition=subpos
                         )
                     )
-            if date:
+            if date or force_date:
                 try:
                     element = datetime.strptime(element, date_format_in).strftime(date_format_out)
                 except Exception as e:
@@ -252,20 +258,28 @@ class EdiBase(ABC):
 
         # --- Handle list of positions ---
         elif isinstance(position, list):
-            return [extract_one(p) for p in position]
+            result = []
+            for p in position:
+                if isinstance(p, (int, tuple)):
+                    result.append(extract_one(p))
+                elif isinstance(p, dict):
+                    pos = p.get("pos")
+                    force_date = p.get("date", False)
+                    result.append(extract_one(pos, force_date=force_date))
+            return result
 
         # --- Handle dict of named positions ---
         elif isinstance(position, dict):
-            result = {}
+            result = []
             for key, spec in position.items():
                 if isinstance(spec, dict):
                     # supports e.g. {"pos": 4, "date": True}
                     pos = spec.get("pos")
-                    force_date = spec.get("date", None)
+                    force_date = spec.get("date", False)
                 else:
                     pos = spec
-                    force_date = None
-                result[key] = extract_one(pos, force_date=force_date)
+                    force_date = False
+                result.append(extract_one(pos, force_date=force_date))
             return result
 
         # --- Unsupported input ---
@@ -309,6 +323,26 @@ class EdiDocument(object):
     def add_attr(self, **kwargs):
         for key, value in kwargs.items():
             setattr(self, key, value)
+    def format_data(self):
+        dic_list =[ 
+        {
+            'document_reference': self.ref_no,
+            'ship_to_plant': part.address,
+            'document_issue_date': self.document_issue_date,
+            'customer_po': part.purchase_order,
+            'window_start_date': self.horizon_start_date,
+            'window_end_date': self.horizon_end_date,
+            'part_no': part.part_no,
+            'Manufacturing_Commitment': part.manufacturing_commitment,
+            'Material_Commitment': part.material_commitment,
+            'release_qty': release.quantity,
+            'release_date': release.date,
+            'release_type': release.rel_type
+        }
+            for part in self.part_list
+            for release in part.release_list
+        ]
+        return dic_list
 
 class EdiPart(EdiDocument):
     def __init__(self, part_no: str, revision=None, **kwargs):
@@ -316,15 +350,17 @@ class EdiPart(EdiDocument):
         self.revision = revision
         self.part_rev = f"{self.part_no}-{self.revision}"
         self.release_list = []
-        self.po = kwargs.get('po', None) or kwargs.get('customer_po', None)
+        self.purchase_order = kwargs.get('purchase_order', None) or kwargs.get('po', None) or kwargs.get('customer_po', None)
         self.address = None
         self.total_accum = None
         self.total_accum_start_date = None
         self.total_accum_end_date = None
+        self.material_commitment = None
+        self.manufacturing_commitment = None
         for key, value in kwargs.items():
             setattr(self, key, value)
     def __repr__(self):
-        return f"EdiPart(part_no={self.part_no}, revision={self.revision}, po={self.po})"
+        return f"EdiPart(part_no={self.part_no}, revision={self.revision}, purchase_order={self.purchase_order})"
     def set_if_none(self, name: str, value) -> None:
         if getattr(self, name, None) is None:
             setattr(self, name, value)
